@@ -1,0 +1,36 @@
+{
+ "version": "2can-v0.1",
+ "verify": {
+  "pass_min": 0.9,
+  "fail_max": 0.03,
+  "max_windows": 32,
+  "max_claim_chars": 1000,
+  "min_claim_words": 3,
+  "calibration": {
+   "method": "logistic on [logit(p_modernbert), logit(p_minicheck)], inputs clipped to [1e-4, 1-1e-4]",
+   "w_mb": 0.286312,
+   "w_mc": 0.320966,
+   "bias": 0.61999,
+   "clip": 0.0001
+  }
+ },
+ "choose": {
+  "default_template": "This text is about {}.",
+  "min_top": 0.5,
+  "min_margin": 0.2,
+  "multi_pass": 0.7,
+  "multi_fail": 0.3,
+  "max_windows": 16
+ },
+ "score": {
+  "high": 0.8,
+  "low": 0.2,
+  "max_windows": 16
+ },
+ "fit": {
+  "labels": "LLM-AggreFact dev split (human labels; parameters only, no rows redistributed)",
+  "sample": "up to 400 rows per sub-dataset, seed 0 (4,349 rows)",
+  "thresholds": "fixed-sequence strict-to-loose search; 95% Clopper-Pearson upper bound on false-accept and false-reject rates <= 0.10; at most 3 items counted per source document",
+  "script": "scripts/fit_calibration.py"
+ }
+}

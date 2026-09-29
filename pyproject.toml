@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "2can"
+version = "0.1.0"
+description = "Two encoders must agree, or it abstains: a small, calibrated, non-generative claim checker."
+readme = "README.md"
+license = "MIT"
+authors = [{ name = "James Yeung" }]
+requires-python = ">=3.10"
+dependencies = ["torch>=2.1", "transformers>=4.56", "numpy"]
+
+[project.optional-dependencies]
+fit = ["scipy", "pandas", "datasets"]
+
+[project.scripts]
+2can-serve = "two_can.server:main"
+
+[tool.setuptools]
+packages = ["two_can"]
+
+[tool.setuptools.package-data]
+two_can = ["policy.json"]
