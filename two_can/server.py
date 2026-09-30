@@ -5,7 +5,7 @@ called SUPPORTED or UNSUPPORTED; anything else is NOUL ("no usable answer"). Als
 choose/score over a third encoder. Pure stdlib HTTP server; no text generation.
 
 Configuration (all optional, via environment):
-  TWOCAN_POLICY        path to a policy JSON          (default: bundled policy.json; policy_light.json = 2 models)
+  TWOCAN_POLICY        "default", "light" (two models, v0.1 behaviour), or a path to a policy JSON
   TWOCAN_BIND          bind address                   (default: 127.0.0.1)
   TWOCAN_PORT          port                           (default: 8766)
   TWOCAN_TOKEN_FILE    file holding a bearer token    (required when binding a non-loopback address)
@@ -25,7 +25,8 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-POLICY_PATH = os.environ.get("TWOCAN_POLICY", os.path.join(HERE, "policy.json"))
+POLICY_PATH = os.environ.get("TWOCAN_POLICY", "default")
+POLICY_PATH = {"default": os.path.join(HERE, "policy.json"), "light": os.path.join(HERE, "policy_light.json")}.get(POLICY_PATH, POLICY_PATH)
 TOKEN_PATH = os.environ.get("TWOCAN_TOKEN_FILE")
 REQ_LOG = os.environ.get("TWOCAN_REQUEST_LOG")
 HEADS_DIR = os.environ.get("TWOCAN_HEADS")
@@ -255,9 +256,14 @@ SENT_END = re.compile(r"(?<=[.!?])\s+|\n+")
 def fc_chunks(src):
     """Sentence-packed chunks of at most FC_CHUNK_WORDS words (FactCG/MiniCheck-style document chunking)."""
     chunks, ch, size = [], [], 0
+    sents = []
     for s in (x.strip() for x in SENT_END.split(src)):
-        if not s:
-            continue
+        w = s.split()
+        if len(w) > FC_CHUNK_WORDS:   # split only run-on "sentences"; leave normal ones byte-for-byte
+            sents += [" ".join(w[i:i + FC_CHUNK_WORDS]) for i in range(0, len(w), FC_CHUNK_WORDS)]
+        elif s:
+            sents.append(s)
+    for s in sents:
         n = len(s.split())
         if ch and size + n > FC_CHUNK_WORDS:
             chunks.append("\n".join(ch)); ch, size = [], 0
@@ -267,10 +273,20 @@ def fc_chunks(src):
     return chunks or [src]
 
 
+def fc_prompt(chunk, claim):
+    """FC_TPL with only the premise truncated, so the claim at the end of the prompt always survives."""
+    tok, room = ENG["fc"].tok, ENG["fc"].maxlen - 8
+    budget = room - len(tok.encode(FC_TPL.format(text_a="", text_b=claim), add_special_tokens=False))
+    ids = tok.encode(chunk, add_special_tokens=False)
+    if len(ids) > budget:
+        chunk = tok.decode(ids[:max(0, budget)])
+    return FC_TPL.format(text_a=chunk, text_b=claim)
+
+
 def score_fc(source, claims):
     """Max over chunks of FactCG P(supported) for each claim."""
     chunks = fc_chunks(source)
-    pairs = [(FC_TPL.format(text_a=c, text_b=cl), None) for cl in claims for c in chunks]
+    pairs = [(fc_prompt(c, cl), None) for cl in claims for c in chunks]
     probs = ENG["fc"].run(pairs)
     k = len(chunks)
     return [max(probs[j * k:(j + 1) * k]) for j in range(len(claims))], len(pairs)
@@ -318,7 +334,7 @@ def head_verify(source, claims):
             pm, n1, w1 = score_pairs(ENG["mb"], [source] * len(tc), tc)
             pc, n2, w2 = score_pairs(ENG["mc"], [source] * len(tc), tc)
             pf, n3 = score_fc(source, tc) if USE_FC else ([None] * len(tc), 0)
-            stats = {"pairs": n1 + n2 + n3, "windows": max(w1, w2)}
+            stats = {"pairs": n1 + n2 + n3, "windows": max(w1, w2, n3 // max(1, len(tc)))}
             P, F = pv["pass_min"], pv["fail_max"]
             for k, i in enumerate(todo):
                 a, b = pm[k], pc[k]
@@ -447,7 +463,7 @@ def dispatch(op, body):
         if not isinstance(texts, list) or not texts or len(texts) > MAX_ITEMS:
             raise ValueError("texts must be a non-empty list of at most %d" % MAX_ITEMS)
         enc = body.get("encoder", "zs")
-        if enc not in ENG:
+        if enc not in ENG or ENG[enc].single:
             raise ValueError("unknown encoder")
         return {"type": "embed", "encoder": enc, "embeddings": ENG[enc].embed(texts), "stats": {"pairs": len(texts)}}
     if op == "choose":
@@ -486,7 +502,7 @@ LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "2can/0.1"
+    server_version = "2can/0.2"
 
     def log_message(self, fmt, *args):
         pass

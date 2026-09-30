@@ -31,12 +31,13 @@ combines the two verify models with a third fact-checker, FactCG, which raised h
 classifies and never generates text, so it cannot invent content, although it can still be wrong
 (see the error rates below).
 
-It is small: about 1.2B parameters across the three verify models. In our runs on an RTX 5060 Ti
-16 GB, scoring the evaluation sample one request at a time took about 175 ms per claim, and GPU
-memory peaked at about 11 GB (FactCG reads up to 2,048 tokens per chunk). CPU is much slower. The
-lighter v0.1 behavior (two models, about half the time) is kept as
-[`two_can/policy_light.json`](two_can/policy_light.json): run it with
-`TWOCAN_POLICY=two_can/policy_light.json 2can-serve`.
+It is small: about 1.2B parameters across the three models that score a claim (the two that decide,
+plus FactCG). In our runs on an RTX 5060 Ti 16 GB, scoring the evaluation sample one request at a
+time took about 175 ms per claim. FactCG reads up to 2,048 tokens per chunk, so memory use can
+exceed 12 GB: our run reached the card's limit while sharing it with a 3 GB process. **Use a
+16 GB GPU, or lower `TWOCAN_TOKEN_BUDGET`.** CPU is much slower. The lighter v0.1 behavior (two
+models, about half the time and memory) is kept as
+[`two_can/policy_light.json`](two_can/policy_light.json): run `TWOCAN_POLICY=light 2can-serve`.
 
 This repo ships **no new weights**. 2Can is a policy plus a calibration layer over four published
 models (not fine-tuned or merged), which are downloaded from the Hub on first run:
@@ -63,7 +64,7 @@ curl -s localhost:8766/v1/verify -H 'Content-Type: application/json' -d '{
 
 | claim | `decision` | `p_supported` |
 |---|---|---|
-| The bridge opened in 1937. | `SUPPORTED` | 0.909 |
+| The bridge opened in 1937. | `SUPPORTED` | 0.907 |
 | The bridge opened in 1952. | `NOUL` (uncertain) | 0.076 |
 | The Golden Gate Bridge is in Paris. | `NOUL` (uncertain) | 0.041 |
 
@@ -112,10 +113,16 @@ that sit near a threshold can flip.
 | calibration error (ECE) of `p_supported` | **0.015** (v0.1, two inputs: 0.016; averaging the two verify probabilities: 0.101) |
 | AUROC of `p_supported` | **0.889** (v0.1, two inputs: 0.871; +0.018, 95% document-clustered bootstrap CI +0.013 to +0.023) |
 
-The decision rows are identical in v0.1 and v0.2, because FactCG only feeds `p_supported`. Adding
-FactCG was pre-registered with a pass bar before any number was computed. It helped most on
-AggreFact-CNN (+0.062 AUROC), Wice, AggreFact-XSum and RAGTruth, and slightly hurt ExpertQA
-(−0.004) and FactCheck-GPT (−0.004). Two other ideas tested the same way did not clear their bars:
+The decision rows are identical in v0.1 and v0.2, because FactCG only feeds `p_supported`. The
+combination (FactCG as a third calibration input), its pass bar and the test read were
+pre-registered before any number for the combination was computed; FactCG's standalone benchmark
+scores were already known. It was then re-confirmed through 2Can's own server code. Review of that
+code found a bug: a source with a very long run and no sentence breaks could push the claim out of
+FactCG's 2,048-token prompt. It affected 16 of the 8,707 evaluation rows. Those rows were re-scored
+with the fixed code and the result was re-read; the gain was unchanged at +0.018, and
+[`tests/`](tests/) now guards the fix. It helped most on AggreFact-CNN (+0.062 AUROC), Wice,
+AggreFact-XSum and RAGTruth, and slightly hurt ExpertQA (−0.005) and FactCheck-GPT (−0.005). Two
+other ideas tested the same way did not clear their bars:
 a numbers-in-the-claim-missing-from-the-source feature (+0.002 AUROC), and deciding directly on
 `p_supported` (more coverage, but the false-reject bound rose to 13.8%).
 
@@ -139,7 +146,7 @@ a numbers-in-the-claim-missing-from-the-source feature (+0.002 AUROC), and decid
 
 If you use 2Can, please cite the upstream models and LLM-AggreFact:
 Tang, Laban & Durrett, *MiniCheck: Efficient Fact-Checking of LLMs on Grounding Documents* (2024),
-and Lei et al., *FactCG: Enhancing Fact Checks via Graph-Based Multi-Hop Data* (NAACL 2025).
+and Lei et al., *FactCG: Enhancing Fact Checkers with Graph-Based Multi-Hop Data* (NAACL 2025).
 
 ## License
 

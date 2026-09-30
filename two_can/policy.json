@@ -9,10 +9,10 @@
   "use_factcg": true,
   "calibration": {
    "method": "logistic on [logit(p_modernbert), logit(p_minicheck), logit(p_factcg)], inputs clipped to [1e-4, 1-1e-4]",
-   "w_mb": 0.18974,
-   "w_mc": 0.135637,
-   "w_fc": 0.429322,
-   "bias": 0.647635,
+   "w_mb": 0.188171,
+   "w_mc": 0.132325,
+   "w_fc": 0.436149,
+   "bias": 0.650046,
    "clip": 0.0001
   }
  },
