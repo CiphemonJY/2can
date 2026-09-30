@@ -119,7 +119,8 @@ pre-registered before any number for the combination was computed; FactCG's stan
 scores were already known. It was then re-confirmed through 2Can's own server code. Review of that
 code found a bug: a source with a very long run and no sentence breaks could push the claim out of
 FactCG's 2,048-token prompt. It affected 16 of the 8,707 evaluation rows. Those rows were re-scored
-with the fixed code and the result was re-read; the gain was unchanged at +0.018, and
+with the fixed code, the calibration weights were refit on dev, and the test result was re-read;
+the gain was unchanged at +0.018, and
 [`tests/`](tests/) now guards the fix. It helped most on AggreFact-CNN (+0.062 AUROC), Wice,
 AggreFact-XSum and RAGTruth, and slightly hurt ExpertQA (−0.005) and FactCheck-GPT (−0.005). Two
 other ideas tested the same way did not clear their bars:
@@ -137,6 +138,9 @@ a numbers-in-the-claim-missing-from-the-source feature (+0.002 AUROC), and decid
 - **Contradictions usually come back `NOUL`, not `UNSUPPORTED`** (see the quick-start table),
   including a changed number or a plain falsehood. `p_supported` still ranks them low.
 - **Long sources** of more than 32 windows of 512 tokens return `NOUL` (`source_too_long`).
+  FactCG reads sources in chunks of up to 550 words. In unusually token-dense text (long numbers,
+  code, non-English) a chunk can exceed its 2,048-token prompt, and then the end of that chunk is
+  not seen by FactCG. The claim itself is never cut.
 - **English only**, as far as the upstream models go.
 - **Commercial use:** 2Can's own code and policy are MIT. The upstream models carry their own
   licenses (above), and some of them were trained on research datasets with non-commercial terms,
