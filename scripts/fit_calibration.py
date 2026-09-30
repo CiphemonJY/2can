@@ -21,9 +21,14 @@ TARGET, CAP = 0.10, 3
 
 # ---------------------------------------------------------------- score
 def score(a):
-    from datasets import load_dataset
-    d = load_dataset("lytang/LLM-AggreFact", split=a.split).to_pandas().reset_index().rename(columns={"index": "row"})
-    d = __import__("pandas").concat([g.sample(min(a.cap, len(g)), random_state=0) for _, g in d.groupby("dataset")])
+    import pandas as pd
+    if a.parquet:
+        d = pd.read_parquet(a.parquet)
+    else:
+        from datasets import load_dataset
+        d = load_dataset("lytang/LLM-AggreFact", split=a.split).to_pandas()
+    d = d.reset_index().rename(columns={"index": "row"})
+    d = pd.concat([g.sample(min(a.cap, len(g)), random_state=0) for _, g in d.groupby("dataset")])
     hdr = {"Content-Type": "application/json"}
     if a.token_file:
         hdr["Authorization"] = "Bearer " + open(a.token_file).read().strip()
@@ -39,7 +44,8 @@ def score(a):
                 res = json.load(urllib.request.urlopen(req, timeout=600))["results"]
                 for r, x in zip(part, res):
                     f.write(json.dumps({"row": int(r.row), "dataset": r.dataset, "y": int(r.label), "src": hashlib.sha1(doc.encode()).hexdigest(),
-                                        "pm": x.get("p_modernbert"), "pc": x.get("p_minicheck"), "noul_reason": x.get("noul_reason")}) + "\n")
+                                        "pm": x.get("p_modernbert"), "pc": x.get("p_minicheck"), "pf": x.get("p_factcg"),
+                                        "noul_reason": x.get("noul_reason")}) + "\n")
                 n += len(part)
             f.flush()
     print("scored", n, "rows in", round(time.time() - t0), "s ->", a.out)
@@ -131,9 +137,11 @@ def fit(a):
     dev = [json.loads(l) for l in open(a.dev)]
     test = [json.loads(l) for l in open(a.test)]
     ds, ts = [r for r in dev if r["pm"] is not None], [r for r in test if r["pm"] is not None]
-    X = lambda R: np.column_stack([lg(np.array([r["pm"] for r in R])), lg(np.array([r["pc"] for r in R]))])
+    keys = ["pm", "pc"] + (["pf"] if all(r.get("pf") is not None for r in ds + ts) else [])   # FactCG input when scored
+    X = lambda R: np.column_stack([lg(np.array([r[k] for r in R])) for k in keys])
     w = fit_logistic(X(ds), np.array([r["y"] for r in ds]))
-    print("calibration  w_mb %.6f  w_mc %.6f  bias %.6f  (fit n=%d)" % (w[0], w[1], w[2], len(ds)))
+    names = {"pm": "w_mb", "pc": "w_mc", "pf": "w_fc"}
+    print("calibration  " + "  ".join("%s %.6f" % (names[k], w[j]) for j, k in enumerate(keys)) + "  bias %.6f  (fit n=%d)" % (w[-1], len(ds)))
     for name, R in (("dev", ds), ("test", ts)):
         y = np.array([r["y"] for r in R]); pm = np.array([r["pm"] for r in R]); pc = np.array([r["pc"] for r in R])
         pcal = sig(np.column_stack([X(R), np.ones(len(R))]) @ w)
@@ -147,7 +155,9 @@ def fit(a):
         cur = json.load(open(a.policy))["verify"]
         e = evaluate(test, cur["pass_min"], cur["fail_max"])
         print(f"  current policy {cur['pass_min']}/{cur['fail_max']} on test: coverage {e['coverage']:.3f}  fa_ucb95 {e['fa_ucb95']:.3f}  fr_ucb95 {e['fr_ucb95']:.3f}")
-    print(json.dumps({"pass_min": P, "fail_max": F, "calibration": {"w_mb": round(float(w[0]), 6), "w_mc": round(float(w[1]), 6), "bias": round(float(w[2]), 6), "clip": EPS}}, indent=1))
+    cal = {names[k]: round(float(w[j]), 6) for j, k in enumerate(keys)}
+    cal.update({"bias": round(float(w[-1]), 6), "clip": EPS})
+    print(json.dumps({"pass_min": P, "fail_max": F, "calibration": cal}, indent=1))
 
 
 if __name__ == "__main__":
@@ -155,6 +165,7 @@ if __name__ == "__main__":
     sub = ap.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("score"); s.add_argument("split", choices=["dev", "test"]); s.add_argument("--out", required=True)
     s.add_argument("--cap", type=int, default=400); s.add_argument("--url", default="http://127.0.0.1:8766"); s.add_argument("--token-file")
+    s.add_argument("--parquet", help="local copy of the split instead of downloading it")
     f = sub.add_parser("fit"); f.add_argument("dev"); f.add_argument("test"); f.add_argument("--policy")
     a = ap.parse_args()
     score(a) if a.cmd == "score" else fit(a)

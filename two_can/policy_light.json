@@ -1,18 +1,16 @@
 {
- "version": "2can-v0.2",
+ "version": "2can-v0.2-light",
  "verify": {
   "pass_min": 0.9,
   "fail_max": 0.03,
   "max_windows": 32,
   "max_claim_chars": 1000,
   "min_claim_words": 3,
-  "use_factcg": true,
   "calibration": {
-   "method": "logistic on [logit(p_modernbert), logit(p_minicheck), logit(p_factcg)], inputs clipped to [1e-4, 1-1e-4]",
-   "w_mb": 0.18974,
-   "w_mc": 0.135637,
-   "w_fc": 0.429322,
-   "bias": 0.647635,
+   "method": "logistic on [logit(p_modernbert), logit(p_minicheck)], inputs clipped to [1e-4, 1-1e-4]",
+   "w_mb": 0.286312,
+   "w_mc": 0.320966,
+   "bias": 0.61999,
    "clip": 0.0001
   }
  },

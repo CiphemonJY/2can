@@ -25,19 +25,27 @@ NLI model and a fact-checking model, and only answers when both agree strongly:
 | `UNSUPPORTED` | both models ≤ `fail_max` (0.03) |
 | `NOUL` | anything else: the models disagree, or neither is confident |
 
-Every scored claim also gets **`p_supported`**, a single calibrated probability that combines both
-models. 2Can only classifies and never generates text, so it cannot invent content, although it can
-still be wrong (see the error rates below). It is small (about 0.75B parameters across the two
-verify encoders): in our runs on an RTX 5060 Ti 16 GB it took roughly 60–85 ms per claim, batched,
-depending on source length, and CPU is much slower.
+Every scored claim also gets **`p_supported`**, a single calibrated probability. Since v0.2 it
+combines the two verify models with a third fact-checker, FactCG, which raised held-out AUROC from
+0.871 to 0.889 (see below). The decision rule still uses only the two verify models. 2Can only
+classifies and never generates text, so it cannot invent content, although it can still be wrong
+(see the error rates below).
 
-This repo ships **no new weights**. 2Can is a policy plus a calibration layer over three published
+It is small: about 1.2B parameters across the three verify models. In our runs on an RTX 5060 Ti
+16 GB, scoring the evaluation sample one request at a time took about 175 ms per claim, and GPU
+memory peaked at about 11 GB (FactCG reads up to 2,048 tokens per chunk). CPU is much slower. The
+lighter v0.1 behavior (two models, about half the time) is kept as
+[`two_can/policy_light.json`](two_can/policy_light.json): run it with
+`TWOCAN_POLICY=two_can/policy_light.json 2can-serve`.
+
+This repo ships **no new weights**. 2Can is a policy plus a calibration layer over four published
 models (not fine-tuned or merged), which are downloaded from the Hub on first run:
 
 | role | model | license |
 |---|---|---|
 | verify (NLI) | [tasksource/ModernBERT-large-nli](https://huggingface.co/tasksource/ModernBERT-large-nli) | Apache-2.0 |
 | verify (fact-check) | [lytang/MiniCheck-RoBERTa-Large](https://huggingface.co/lytang/MiniCheck-RoBERTa-Large) | MIT |
+| calibration input (fact-check) | [yaxili96/FactCG-DeBERTa-v3-Large](https://huggingface.co/yaxili96/FactCG-DeBERTa-v3-Large) | MIT |
 | choose / score (zero-shot) | [MoritzLaurer/ModernBERT-large-zeroshot-v2.0](https://huggingface.co/MoritzLaurer/ModernBERT-large-zeroshot-v2.0) | Apache-2.0 |
 
 ## Quick start
@@ -55,17 +63,18 @@ curl -s localhost:8766/v1/verify -H 'Content-Type: application/json' -d '{
 
 | claim | `decision` | `p_supported` |
 |---|---|---|
-| The bridge opened in 1937. | `SUPPORTED` | 0.966 |
-| The bridge opened in 1952. | `NOUL` (uncertain) | 0.122 |
-| The Golden Gate Bridge is in Paris. | `NOUL` (uncertain) | 0.052 |
+| The bridge opened in 1937. | `SUPPORTED` | 0.909 |
+| The bridge opened in 1952. | `NOUL` (uncertain) | 0.076 |
+| The Golden Gate Bridge is in Paris. | `NOUL` (uncertain) | 0.041 |
 
 `UNSUPPORTED` is deliberately strict: both models must put the claim at or below 0.03, which only
 about 10% of LLM-AggreFact claims reach. **To reject claims, threshold `p_supported`.** Treat
 `SUPPORTED` as the high-precision tier: about 6% of `SUPPORTED` claims were still false on the
 held-out set.
 
-Each result carries `decision`, `noul_reason`, `p_supported`, both raw model probabilities
-(`p_modernbert`, `p_minicheck`), and `confidence` (the weaker model's margin on a decision).
+Each result carries `decision`, `noul_reason`, `p_supported`, the raw model probabilities
+(`p_modernbert`, `p_minicheck`, and `p_factcg` when enabled), and `confidence` (the weaker verify
+model's margin on a decision).
 
 Other endpoints: `POST /v1/choose` (zero-shot pick among options, or `NOUL` when none fits or two
 are too close), `POST /v1/score` (0-1 score of text against a criterion, `NOUL` in the middle
@@ -81,7 +90,7 @@ the configuration is described at the top of [`two_can/server.py`](two_can/serve
 Everything in [`two_can/policy.json`](two_can/policy.json) was fit on **public human labels**, the
 dev split of [LLM-AggreFact](https://huggingface.co/datasets/lytang/LLM-AggreFact), and evaluated on
 its held-out test split. (The splits share 110 of 2,849 test source documents, which matters
-little for a 3-parameter fit.) At most 400 rows were sampled per sub-dataset (seed 0), so no
+little for a 4-parameter fit.) At most 400 rows were sampled per sub-dataset (seed 0), so no
 single source dominates. LLM-AggreFact is gated and licensed CC BY-ND 4.0, so only the fitted
 parameters are distributed here, never its rows.
 [`scripts/fit_calibration.py`](scripts/fit_calibration.py) reproduces both fits.
@@ -100,13 +109,20 @@ that sit near a threshold can flip.
 | claims decided (not `NOUL`) | 35.5% of 4,358 |
 | false accepts among `SUPPORTED` | 68 / 1,114 (6.1%); 95% upper bound 9.5% (document-capped) |
 | false rejects among `UNSUPPORTED` | 36 / 433 (8.3%); 95% upper bound 10.9% (document-capped), **just above the 10% target** |
-| calibration error (ECE) of `p_supported` | **0.016** (averaging the raw model probabilities gives 0.101) |
-| AUROC of `p_supported` | 0.871 |
+| calibration error (ECE) of `p_supported` | **0.015** (v0.1, two inputs: 0.016; averaging the two verify probabilities: 0.101) |
+| AUROC of `p_supported` | **0.889** (v0.1, two inputs: 0.871; +0.018, 95% document-clustered bootstrap CI +0.013 to +0.023) |
+
+The decision rows are identical in v0.1 and v0.2, because FactCG only feeds `p_supported`. Adding
+FactCG was pre-registered with a pass bar before any number was computed. It helped most on
+AggreFact-CNN (+0.062 AUROC), Wice, AggreFact-XSum and RAGTruth, and slightly hurt ExpertQA
+(−0.004) and FactCheck-GPT (−0.004). Two other ideas tested the same way did not clear their bars:
+a numbers-in-the-claim-missing-from-the-source feature (+0.002 AUROC), and deciding directly on
+`p_supported` (more coverage, but the false-reject bound rose to 13.8%).
 
 ## Limitations
 
 - **Calibration depends on the text you feed it.** `p_supported` was fit on LLM-AggreFact. Across
-  its sub-datasets the test ECE ranges from 0.03 to 0.27 (ExpertQA and Reveal are worst), and it
+  its sub-datasets the test ECE ranges from 0.03 to 0.29 (ExpertQA and Reveal are worst), and it
   can be worse again on text unlike LLM-AggreFact. If you have labelled data from your own domain,
   refit with `scripts/fit_calibration.py`.
 - **It abstains a lot, on purpose.** About two thirds of LLM-AggreFact claims come back `NOUL`.
@@ -122,7 +138,8 @@ that sit near a threshold can flip.
 ## Citation
 
 If you use 2Can, please cite the upstream models and LLM-AggreFact:
-Tang, Laban & Durrett, *MiniCheck: Efficient Fact-Checking of LLMs on Grounding Documents* (2024).
+Tang, Laban & Durrett, *MiniCheck: Efficient Fact-Checking of LLMs on Grounding Documents* (2024),
+and Lei et al., *FactCG: Enhancing Fact Checks via Graph-Based Multi-Hop Data* (NAACL 2025).
 
 ## License
 

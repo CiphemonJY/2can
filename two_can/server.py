@@ -5,7 +5,7 @@ called SUPPORTED or UNSUPPORTED; anything else is NOUL ("no usable answer"). Als
 choose/score over a third encoder. Pure stdlib HTTP server; no text generation.
 
 Configuration (all optional, via environment):
-  TWOCAN_POLICY        path to a policy JSON          (default: the bundled policy.json)
+  TWOCAN_POLICY        path to a policy JSON          (default: bundled policy.json; policy_light.json = 2 models)
   TWOCAN_BIND          bind address                   (default: 127.0.0.1)
   TWOCAN_PORT          port                           (default: 8766)
   TWOCAN_TOKEN_FILE    file holding a bearer token    (required when binding a non-loopback address)
@@ -49,11 +49,20 @@ VERSION = POLICY["version"]
 CAL = POLICY.get("verify", {}).get("calibration")
 
 
-def p_supported(a, b):
-    """Calibrated P(supported) from the two verify probabilities (logistic on their log-odds; policy verify.calibration)."""
+USE_FC = bool(POLICY.get("verify", {}).get("use_factcg"))
+if CAL and USE_FC != ("w_fc" in CAL):
+    raise SystemExit("policy mismatch: use_factcg=%s but calibration %s w_fc; use the matching policy file" % (USE_FC, "has" if "w_fc" in CAL else "lacks"))
+
+
+def p_supported(a, b, f=None):
+    """Calibrated P(supported): logistic on the verify probabilities' log-odds (policy verify.calibration).
+    With use_factcg the FactCG probability is a third input (weight w_fc)."""
     e = CAL["clip"]
     lg = lambda p: float(np.log(min(max(p, e), 1 - e) / (1 - min(max(p, e), 1 - e))))
-    return round(1.0 / (1.0 + float(np.exp(-(CAL["w_mb"] * lg(a) + CAL["w_mc"] * lg(b) + CAL["bias"])))), 5)
+    z = CAL["w_mb"] * lg(a) + CAL["w_mc"] * lg(b) + CAL["bias"]
+    if f is not None:
+        z += CAL["w_fc"] * lg(f)
+    return round(1.0 / (1.0 + float(np.exp(-z))), 5)
 
 
 API_TOKEN = None
@@ -79,17 +88,25 @@ MODEL_SPECS = {
     "mc": {"id": "lytang/MiniCheck-RoBERTa-Large", "dtype": torch.float16, "pos_label": "1"},
     "zs": {"id": "MoritzLaurer/ModernBERT-large-zeroshot-v2.0", "dtype": torch.bfloat16, "pos_label": "entailment"},
 }
+if USE_FC:  # single-text prompt model: input is FC_TPL, index 1 = supported
+    MODEL_SPECS["fc"] = {"id": "yaxili96/FactCG-DeBERTa-v3-Large", "dtype": torch.float16, "pos_index": 1, "single": True, "maxlen": 2048}
+FC_TPL = "{text_a}\n\nChoose your answer: based on the paragraph above can we conclude that \"{text_b}\"?\n\nOPTIONS:\n- Yes\n- No\nI think the answer is "
+FC_CHUNK_WORDS = 550
 
 
 class Engine:
     def __init__(self, key, spec):
         self.key = key
         self.id = spec["id"]
+        self.single = spec.get("single", False)
+        self.maxlen = spec.get("maxlen", MAXLEN)
         self.tok = AutoTokenizer.from_pretrained(spec["id"])
+        if self.single:
+            self.tok.pad_token = self.tok.eos_token
         dtype = spec["dtype"] if dev == "cuda" else torch.float32
         self.model = AutoModelForSequenceClassification.from_pretrained(spec["id"], dtype=dtype).to(dev).eval()
         id2label = {int(k): str(v).lower() for k, v in self.model.config.id2label.items()}
-        self.pos = [i for i, l in id2label.items() if l == spec["pos_label"]][0]
+        self.pos = spec["pos_index"] if "pos_index" in spec else [i for i, l in id2label.items() if l == spec["pos_label"]][0]
         self.q = queue.Queue()
         self.stats = collections.Counter()
         threading.Thread(target=self._loop, daemon=True, name="engine-" + key).start()
@@ -170,12 +187,12 @@ class Engine:
         return feats
 
     def _forward(self, flat):
-        lens = [len(p[0]) // 3 + len(p[1]) // 3 + 8 for p in flat]
+        lens = [len(p[0]) // 3 + len(p[1] or "") // 3 + 8 for p in flat]
         order = sorted(range(len(flat)), key=lambda i: lens[i])
         out = [0.0] * len(flat)
         groups, cur = [], []
         for i in order:
-            est = min(MAXLEN, lens[i])
+            est = min(self.maxlen, lens[i])
             if cur and est * (len(cur) + 1) > TOKEN_BUDGET:
                 groups.append(cur)
                 cur = []
@@ -184,7 +201,10 @@ class Engine:
             groups.append(cur)
         with GPU_LOCK, torch.inference_mode():
             for g in groups:
-                enc = self.tok([flat[i][0] for i in g], [flat[i][1] for i in g], truncation="only_first", max_length=MAXLEN, padding=True, return_tensors="pt").to(dev)
+                if self.single:
+                    enc = self.tok([flat[i][0] for i in g], truncation=True, max_length=self.maxlen, padding=True, return_tensors="pt").to(dev)
+                else:
+                    enc = self.tok([flat[i][0] for i in g], [flat[i][1] for i in g], truncation="only_first", max_length=self.maxlen, padding=True, return_tensors="pt").to(dev)
                 p = torch.softmax(self.model(**enc).logits.float(), -1)[:, self.pos].tolist()
                 for i, v in zip(g, p):
                     out[i] = v
@@ -229,6 +249,33 @@ def score_pairs(eng, premises, hyps):
     return best, len(pairs), nwin
 
 
+SENT_END = re.compile(r"(?<=[.!?])\s+|\n+")
+
+
+def fc_chunks(src):
+    """Sentence-packed chunks of at most FC_CHUNK_WORDS words (FactCG/MiniCheck-style document chunking)."""
+    chunks, ch, size = [], [], 0
+    for s in (x.strip() for x in SENT_END.split(src)):
+        if not s:
+            continue
+        n = len(s.split())
+        if ch and size + n > FC_CHUNK_WORDS:
+            chunks.append("\n".join(ch)); ch, size = [], 0
+        ch.append(s); size += n
+    if ch:
+        chunks.append("\n".join(ch))
+    return chunks or [src]
+
+
+def score_fc(source, claims):
+    """Max over chunks of FactCG P(supported) for each claim."""
+    chunks = fc_chunks(source)
+    pairs = [(FC_TPL.format(text_a=c, text_b=cl), None) for cl in claims for c in chunks]
+    probs = ENG["fc"].run(pairs)
+    k = len(chunks)
+    return [max(probs[j * k:(j + 1) * k]) for j in range(len(claims))], len(pairs)
+
+
 def noul(reason, **kw):
     d = {"decision": "NOUL", "noul_reason": reason, "confidence": None}
     d.update(kw)
@@ -270,13 +317,16 @@ def head_verify(source, claims):
         else:
             pm, n1, w1 = score_pairs(ENG["mb"], [source] * len(tc), tc)
             pc, n2, w2 = score_pairs(ENG["mc"], [source] * len(tc), tc)
-            stats = {"pairs": n1 + n2, "windows": max(w1, w2)}
+            pf, n3 = score_fc(source, tc) if USE_FC else ([None] * len(tc), 0)
+            stats = {"pairs": n1 + n2 + n3, "windows": max(w1, w2)}
             P, F = pv["pass_min"], pv["fail_max"]
             for k, i in enumerate(todo):
                 a, b = pm[k], pc[k]
                 base = {"claim_sha": claim_sha(claims[i]), "p_modernbert": round(a, 5), "p_minicheck": round(b, 5)}
+                if USE_FC:
+                    base["p_factcg"] = round(pf[k], 5)
                 if CAL:
-                    base["p_supported"] = p_supported(a, b)
+                    base["p_supported"] = p_supported(a, b, pf[k])
                 if a >= P and b >= P:
                     base.update({"decision": "SUPPORTED", "confidence": round(min(a, b), 5), "noul_reason": None})
                 elif a <= F and b <= F:

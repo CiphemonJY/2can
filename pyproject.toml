@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "2can"
-version = "0.1.0"
+version = "0.2.0"
 description = "Two encoders must agree, or it abstains: a small, calibrated, non-generative claim checker."
 readme = "README.md"
 license = "MIT"
@@ -22,4 +22,4 @@ fit = ["scipy", "pandas", "datasets"]
 packages = ["two_can"]
 
 [tool.setuptools.package-data]
-two_can = ["policy.json"]
+two_can = ["policy.json", "policy_light.json"]
